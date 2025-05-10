@@ -13,6 +13,12 @@ from tqdm import tqdm
 
 from colpali_engine.models import ColQwen2, ColQwen2Processor
 
+import sys
+print(f"Python path: {sys.executable}")
+print(f"PyTorch version: {torch.__version__}")
+print(f"PyTorch path: {torch.__file__}")
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"CUDA version: {torch.version.cuda}")
 
 # Define model paths
 MODEL_DIR = "./models/colqwen2"
