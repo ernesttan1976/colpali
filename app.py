@@ -324,8 +324,8 @@ def index_gpu(images, ds):
         # run inference - docs
         dataloader = DataLoader(
             images,
-            batch_size=4,
-            # num_workers=4,
+            batch_size=1,
+            # num_workers=2,
             shuffle=False,
             collate_fn=lambda x: processor.process_images(x).to(model.device),
         )
