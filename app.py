@@ -321,7 +321,7 @@ def index(files, ds):
         all_images = []
         
         for f in files:
-            # Get the file path
+            # Get the file path and ensure we have a valid filename
             if hasattr(f, 'name'):
                 file_path = f.name
             elif isinstance(f, tuple) and len(f) == 2:
@@ -340,8 +340,8 @@ def index(files, ds):
             filename = os.path.basename(file_path)
             print(f"Processing file: {filename} (path: {file_path})")
             
-            # Check if embeddings exist for this file
-            if db.embeddings_exist(file_path):
+            # Check if embeddings exist for this file - THIS USES ONLY THE FILENAME NOW
+            if db.embeddings_exist(filename):  # <-- Change here: using filename instead of file_path
                 print(f"Loading existing embeddings for {filename}")
                 
                 # Convert file to images for display only
@@ -354,8 +354,8 @@ def index(files, ds):
                     print(f"Error converting file to images: {e}")
                     continue
                 
-                # Load embeddings from database
-                file_embeddings = db.load_embeddings(file_path)
+                # Load embeddings from database using the filename
+                file_embeddings = db.load_embeddings(filename)  # <-- Change here: using filename instead of file_path
                 
                 if file_embeddings and len(file_embeddings) > 0:
                     # Add to our lists
@@ -366,11 +366,11 @@ def index(files, ds):
                 else:
                     print(f"Failed to load embeddings, will regenerate")
                     # Fall back to generating new embeddings
-                    process_new_file(f, file_path, ds, all_images)
+                    process_new_file(f, filename, ds, all_images)  # <-- Change here: using filename
             else:
                 print(f"No existing embeddings for {filename}, generating new ones")
                 # Process the file normally
-                process_new_file(f, file_path, ds, all_images)
+                process_new_file(f, filename, ds, all_images)  # <-- Change here: using filename
                 
         return f"Processed {len(files)} files with {len(ds)} total embeddings", ds, all_images
     except Exception as e:
@@ -379,15 +379,15 @@ def index(files, ds):
         return f"Error in indexing: {str(e)}\n{traceback_str}", ds, []
 
 
-# Add this new function
-def process_new_file(f, file_path, ds, all_images):
+# Modify the process_new_file function
+def process_new_file(f, file_id, ds, all_images):
     """Process a file by generating new embeddings and saving them"""
     try:
         # Convert file to images
         images = convert_files([f])
         
         if not images:
-            print(f"Could not convert {os.path.basename(file_path)} to images")
+            print(f"Could not convert {file_id} to images")
             return
             
         # Get embeddings for this file only
@@ -396,20 +396,20 @@ def process_new_file(f, file_path, ds, all_images):
         
         # Save the new embeddings if successful
         if file_ds and len(file_ds) > 0:
-            saved = db.save_embeddings(file_path, file_ds, len(images))
+            saved = db.save_embeddings(file_id, file_ds, len(images))
             if saved:
-                print(f"Saved {len(file_ds)} new embeddings for {os.path.basename(file_path)}")
+                print(f"Saved {len(file_ds)} new embeddings for {file_id}")
             else:
-                print(f"Failed to save embeddings for {os.path.basename(file_path)}")
+                print(f"Failed to save embeddings for {file_id}")
             
             # Add to our complete lists
             ds.extend(file_ds)
             all_images.extend(images)
         else:
-            print(f"Failed to generate embeddings for {os.path.basename(file_path)}")
+            print(f"Failed to generate embeddings for {file_id}")
     except Exception as e:
-        print(f"Error processing new file {os.path.basename(file_path)}: {e}")
-
+        print(f"Error processing new file {file_id}: {e}")
+        
 # Modified index_gpu function (keeping the core functionality the same)
 @spaces.GPU
 def index_gpu(images, ds):

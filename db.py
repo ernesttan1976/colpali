@@ -9,6 +9,7 @@ import numpy as np
 import pyarrow as pa
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union
+import hashlib
 
 
 class DocumentEmbeddingDatabase:
@@ -24,7 +25,10 @@ class DocumentEmbeddingDatabase:
         print(f"Connected to LanceDB at {db_path}")
         
     def get_table_name_for_file(self, file_path: str) -> str:
-        """Generate a consistent table name for a given file path."""
+        """
+        Generate a consistent table name for a given file path.
+        Only uses the filename, ignoring the path.
+        """
         file_name = os.path.basename(file_path)
         file_name = Path(file_name).stem
         table_name = ''.join(c if c.isalnum() else '_' for c in file_name)
@@ -34,10 +38,18 @@ class DocumentEmbeddingDatabase:
         """Check if embeddings for a file already exist in the database."""
         table_name = self.get_table_name_for_file(file_path)
         try:
+            # Check if the table exists in LanceDB
             exists = table_name in self.db.table_names()
-            if exists:
-                print(f"Found existing embeddings for {os.path.basename(file_path)}")
-            return exists
+            
+            # Also check the direct storage method
+            doc_dir = os.path.join(self.db_path, "embeddings", table_name)
+            exists_direct = os.path.exists(doc_dir)
+            
+            if exists or exists_direct:
+                file_name = os.path.basename(file_path)
+                print(f"Found existing embeddings for {file_name}")
+                return True
+            return False
         except Exception as e:
             print(f"Error checking if embeddings exist: {e}")
             return False
@@ -45,19 +57,20 @@ class DocumentEmbeddingDatabase:
     def save_embeddings_direct(self, file_path: str, embeddings: List[torch.Tensor], page_count: int) -> bool:
         """Save embeddings using direct file writing to bypass LanceDB and PyArrow issues."""
         try:
+            # Only use the filename for consistent table naming
             table_name = self.get_table_name_for_file(file_path)
-            filename = os.path.basename(file_path)
+            file_name = os.path.basename(file_path)
             
-            print(f"Saving {len(embeddings)} embeddings for {filename} using direct method")
+            print(f"Saving {len(embeddings)} embeddings for {file_name} using direct method")
             
             # Create a directory for this document
             doc_dir = os.path.join(self.db_path, "embeddings", table_name)
             os.makedirs(doc_dir, exist_ok=True)
             
-            # Save metadata
+            # Save metadata - store both filename and original path
             embedding_dim = embeddings[0].shape[0] if torch.is_tensor(embeddings[0]) else len(embeddings[0])
             metadata = {
-                "filename": filename,
+                "filename": file_name,
                 "original_path": file_path,
                 "page_count": page_count,
                 "embedding_dimension": embedding_dim,
@@ -81,7 +94,7 @@ class DocumentEmbeddingDatabase:
                 # Save as numpy file
                 np.save(os.path.join(doc_dir, f"embedding_{i:04d}.npy"), embedding_np)
             
-            print(f"Successfully saved {len(embeddings)} embeddings for {filename}")
+            print(f"Successfully saved {len(embeddings)} embeddings for {file_name}")
             return True
         except Exception as e:
             print(f"Error in direct save: {e}")
@@ -98,19 +111,20 @@ class DocumentEmbeddingDatabase:
         """Load embeddings using direct file reading."""
         try:
             table_name = self.get_table_name_for_file(file_path)
-            filename = os.path.basename(file_path)
+            file_name = os.path.basename(file_path)
             doc_dir = os.path.join(self.db_path, "embeddings", table_name)
             
             if not os.path.exists(doc_dir):
                 return None
                 
-            print(f"Loading embeddings for {filename} using direct method")
+            print(f"Loading embeddings for {file_name} using direct method")
             
             # Load metadata
             import json
             try:
                 with open(os.path.join(doc_dir, "metadata.json"), 'r') as f:
                     metadata = json.load(f)
+                    print(f"Loaded metadata: {metadata['filename']} with {metadata.get('page_count', 0)} pages")
             except:
                 metadata = {"dtype": "torch.float32"}
             
@@ -140,7 +154,7 @@ class DocumentEmbeddingDatabase:
                     embedding = embedding.to(target_dtype)
                 embeddings.append(embedding)
             
-            print(f"Successfully loaded {len(embeddings)} embeddings")
+            print(f"Successfully loaded {len(embeddings)} embeddings for {file_name}")
             return embeddings
         except Exception as e:
             print(f"Error in direct load: {e}")
@@ -207,67 +221,3 @@ class DocumentEmbeddingDatabase:
         except Exception as e:
             print(f"Error listing documents: {e}")
             return []
-
-
-# Example usage in app.py:
-"""
-# Initialize the database
-db = DocumentEmbeddingDatabase(db_path="./data/embeddings_db")
-
-# In the index function:
-for file in files:
-    file_path = file.name
-    filename = os.path.basename(file_path)
-    
-    # Check if embeddings exist
-    if db.embeddings_exist(file_path):
-        # Load existing embeddings
-        embeddings = db.load_embeddings(file_path)
-        if embeddings:
-            ds.extend(embeddings)
-    else:
-        # Process file and generate embeddings
-        file_ds = []
-        status, file_ds, _ = index_gpu(images, file_ds)
-        
-        # Save embeddings for future use
-        if file_ds:
-            db.save_embeddings(file_path, file_ds, len(images))
-            ds.extend(file_ds)
-"""
-
-# If this file is run directly, run a small test
-if __name__ == "__main__":
-    print("Testing DocumentEmbeddingDatabase...")
-    
-    # Create test directory
-    os.makedirs("./test_db", exist_ok=True)
-    
-    # Initialize database
-    db = DocumentEmbeddingDatabase(db_path="./test_db")
-    
-    # Create a test embedding
-    test_file = "test_document.pdf"
-    embedding_dim = 1024
-    
-    # Test different dtype handling
-    print("\nTesting float32 embeddings...")
-    embeddings_float32 = [torch.randn(embedding_dim, dtype=torch.float32) for _ in range(3)]
-    db.save_embeddings(test_file, embeddings_float32, 3)
-    loaded = db.load_embeddings(test_file)
-    if loaded:
-        print(f"Successfully loaded {len(loaded)} float32 embeddings")
-    
-    print("\nTesting bfloat16 embeddings...")
-    embeddings_bfloat16 = [torch.randn(embedding_dim, dtype=torch.bfloat16) for _ in range(3)]
-    db.save_embeddings(test_file, embeddings_bfloat16, 3)
-    loaded = db.load_embeddings(test_file)
-    if loaded:
-        print(f"Successfully loaded {len(loaded)} bfloat16 embeddings")
-    
-    print("\nListing documents:")
-    docs = db.list_documents()
-    for doc in docs:
-        print(f"- {doc['filename']} ({doc['page_count']} pages, {doc.get('embedding_dimension', 0)}d)")
-    
-    print("\nTest completed!")
