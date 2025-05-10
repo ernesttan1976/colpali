@@ -6,7 +6,7 @@ from io import BytesIO
 import gradio as gr
 import torch
 
-from pdf2image import convert_from_path
+from pdf2image import convert_from_path, convert_from_bytes
 from PIL import Image
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -208,80 +208,138 @@ def query_gpt4o_mini(query, images, api_key):
             )
             return response.choices[0].message.content
         except Exception as e:
-            return "OpenAI API connection failure. Verify the provided key is correct (sk-***)."
+            return f"OpenAI API connection failure. Error: {e}"
         
     return "Enter your OpenAI API key to get a custom response"
 
 
 @spaces.GPU
 def search(query: str, ds, images, k, api_key):
-    k = min(k, len(ds))
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    if device != model.device:
-        model.to(device)
-        
-    qs = []
-    with torch.no_grad():
-        batch_query = processor.process_queries([query]).to(model.device)
-        embeddings_query = model(**batch_query)
-        qs.extend(list(torch.unbind(embeddings_query.to("cpu"))))
+    try:
+        k = min(k, len(ds))
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        if device != model.device:
+            model.to(device)
+            
+        qs = []
+        with torch.no_grad():
+            batch_query = processor.process_queries([query]).to(model.device)
+            embeddings_query = model(**batch_query)
+            qs.extend(list(torch.unbind(embeddings_query.to("cpu"))))
 
-    scores = processor.score(qs, ds, device=device)
+        scores = processor.score(qs, ds, device=device)
 
-    top_k_indices = scores[0].topk(k).indices.tolist()
+        top_k_indices = scores[0].topk(k).indices.tolist()
 
-    results = []
-    for idx in top_k_indices:
-        results.append((images[idx], f"Page {idx}"))
+        results = []
+        for idx in top_k_indices:
+            results.append((images[idx], f"Page {idx}"))
 
-    # Generate response from GPT-4o-mini
-    ai_response = query_gpt4o_mini(query, results, api_key)
+        # Generate response from GPT-4o-mini
+        ai_response = query_gpt4o_mini(query, results, api_key)
 
-    return results, ai_response
+        return results, ai_response
+    except Exception as e:
+        return [], f"Error in search function: {str(e)}"
 
 
 def index(files, ds):
-    print("Converting files")
-    images = convert_files(files)
-    print(f"Files converted with {len(images)} images.")
-    return index_gpu(images, ds)
+    try:
+        print("Converting files")
+        print(f"File types: {[type(f) for f in files]}")
+        images = convert_files(files)
+        print(f"Files converted with {len(images)} images.")
+        return index_gpu(images, ds)
+    except Exception as e:
+        import traceback
+        traceback_str = traceback.format_exc()
+        return f"Error in indexing: {str(e)}\n{traceback_str}", ds, []
     
 
 
 def convert_files(files):
+    """Convert uploaded files to images, handling different file types from Gradio."""
     images = []
+    
     for f in files:
-        images.extend(convert_from_path(f, thread_count=4))
+        try:
+            # Handle the file based on its type
+            if hasattr(f, 'name'):
+                # This is likely a file object with a name attribute
+                file_path = f.name
+                print(f"Processing file with path: {file_path}")
+                images.extend(convert_from_path(file_path, thread_count=4))
+            elif isinstance(f, tuple) and len(f) == 2:
+                # If it's a tuple of (name, file-like object) as returned by some Gradio versions
+                temp_name, temp_file = f
+                print(f"Processing tuple with name: {temp_name}")
+                # If it's a file-like object, read it and convert from bytes
+                if hasattr(temp_file, 'read'):
+                    file_content = temp_file.read()
+                    images.extend(convert_from_bytes(file_content, thread_count=4))
+                else:
+                    # If it's a path
+                    images.extend(convert_from_path(temp_file, thread_count=4))
+            elif isinstance(f, str):
+                # If it's directly a file path
+                print(f"Processing file path: {f}")
+                images.extend(convert_from_path(f, thread_count=4))
+            else:
+                # Try to get the file path from the object
+                print(f"Unknown file type: {type(f)}, trying to handle generically")
+                if hasattr(f, 'file'):
+                    # Some Gradio versions provide a file attribute
+                    file_content = f.file.read()
+                    images.extend(convert_from_bytes(file_content, thread_count=4))
+                elif hasattr(f, 'read'):
+                    # If it's a file-like object
+                    file_content = f.read()
+                    images.extend(convert_from_bytes(file_content, thread_count=4))
+                else:
+                    raise TypeError(f"Unsupported file type: {type(f)}. Please provide a valid PDF file.")
+        except Exception as e:
+            print(f"Error processing file {f}: {e}")
+            import traceback
+            traceback.print_exc()
+            # Continue with other files rather than failing completely
+            continue
 
     if len(images) >= 150:
         raise gr.Error("The number of images in the dataset should be less than 150.")
+    
+    if not images:
+        raise ValueError("No valid PDF files were processed. Please check your uploads.")
+        
     return images
 
 
 @spaces.GPU
 def index_gpu(images, ds):
     """Example script to run inference with ColPali (ColQwen2)"""
+    try:
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        if device != model.device:
+            model.to(device)
+            
+        # run inference - docs
+        dataloader = DataLoader(
+            images,
+            batch_size=4,
+            # num_workers=4,
+            shuffle=False,
+            collate_fn=lambda x: processor.process_images(x).to(model.device),
+        )
 
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    if device != model.device:
-        model.to(device)
-        
-    # run inference - docs
-    dataloader = DataLoader(
-        images,
-        batch_size=4,
-        # num_workers=4,
-        shuffle=False,
-        collate_fn=lambda x: processor.process_images(x).to(model.device),
-    )
-
-    for batch_doc in tqdm(dataloader):
-        with torch.no_grad():
-            batch_doc = {k: v.to(device) for k, v in batch_doc.items()}
-            embeddings_doc = model(**batch_doc)
-        ds.extend(list(torch.unbind(embeddings_doc.to("cpu"))))
-    return f"Uploaded and converted {len(images)} pages", ds, images
-
+        for batch_doc in tqdm(dataloader):
+            with torch.no_grad():
+                batch_doc = {k: v.to(device) for k, v in batch_doc.items()}
+                embeddings_doc = model(**batch_doc)
+            ds.extend(list(torch.unbind(embeddings_doc.to("cpu"))))
+        return f"Uploaded and converted {len(images)} pages", ds, images
+    except Exception as e:
+        import traceback
+        traceback_str = traceback.format_exc()
+        return f"Error in processing: {str(e)}\n{traceback_str}", ds, []
 
 
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
@@ -321,4 +379,27 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     search_button.click(search, inputs=[query, embeds, imgs, k, api_key], outputs=[output_gallery, output_text])
 
 if __name__ == "__main__":
-    demo.queue(max_size=10).launch(debug=True)
+    # Use a simpler launch method to avoid compatibility issues
+    import atexit
+    import shutil
+    import tempfile
+    
+    # Create a temporary directory for file uploads if it doesn't exist
+    temp_dir = os.path.join(tempfile.gettempdir(), "colpali_uploads")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # Clean up function to remove temp files
+    def cleanup():
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    
+    # Register the cleanup function
+    atexit.register(cleanup)
+    
+    # Launch Gradio with simplified server settings
+    demo.queue(max_size=10).launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=False,
+        debug=True
+    )
