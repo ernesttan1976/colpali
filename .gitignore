@@ -27,3 +27,4 @@ build/
 *.swo
 
 models/
+data/embeddings_db/

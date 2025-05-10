@@ -14,6 +14,15 @@ from tqdm import tqdm
 from colpali_engine.models import ColQwen2, ColQwen2Processor
 
 import sys
+
+from db import DocumentEmbeddingDatabase
+
+# Create the directory for the embeddings database if it doesn't exist
+os.makedirs("./data/embeddings_db", exist_ok=True)
+
+# Initialize the database - this connects to the local file-based database
+db = DocumentEmbeddingDatabase(db_path="./data/embeddings_db")
+
 print(f"Python path: {sys.executable}")
 print(f"PyTorch version: {torch.__version__}")
 print(f"PyTorch path: {torch.__file__}")
@@ -244,19 +253,6 @@ def search(query: str, ds, images, k, api_key):
         return [], f"Error in search function: {str(e)}"
 
 
-def index(files, ds):
-    try:
-        print("Converting files")
-        print(f"File types: {[type(f) for f in files]}")
-        images = convert_files(files)
-        print(f"Files converted with {len(images)} images.")
-        return index_gpu(images, ds)
-    except Exception as e:
-        import traceback
-        traceback_str = traceback.format_exc()
-        return f"Error in indexing: {str(e)}\n{traceback_str}", ds, []
-    
-
 
 def convert_files(files):
     """Convert uploaded files to images, handling different file types from Gradio."""
@@ -314,6 +310,107 @@ def convert_files(files):
     return images
 
 
+# Replace the existing index function with this version
+def index(files, ds):
+    try:
+        print("Converting files")
+        print(f"File types: {[type(f) for f in files]}")
+        
+        # Reset the embeddings list and images list
+        ds = []
+        all_images = []
+        
+        for f in files:
+            # Get the file path
+            if hasattr(f, 'name'):
+                file_path = f.name
+            elif isinstance(f, tuple) and len(f) == 2:
+                file_path = f[0]  # Use the name from the tuple
+            elif isinstance(f, str):
+                file_path = f
+            else:
+                # Try other approaches to get the path
+                if hasattr(f, 'file'):
+                    file_path = str(f.file)
+                else:
+                    # Generate a temporary unique identifier if we can't get the path
+                    import hashlib
+                    file_path = f"unknown_file_{hashlib.md5(str(f).encode()).hexdigest()}"
+            
+            filename = os.path.basename(file_path)
+            print(f"Processing file: {filename} (path: {file_path})")
+            
+            # Check if embeddings exist for this file
+            if db.embeddings_exist(file_path):
+                print(f"Loading existing embeddings for {filename}")
+                
+                # Convert file to images for display only
+                try:
+                    images = convert_files([f])
+                    if not images:
+                        print(f"Could not convert {filename} to images")
+                        continue
+                except Exception as e:
+                    print(f"Error converting file to images: {e}")
+                    continue
+                
+                # Load embeddings from database
+                file_embeddings = db.load_embeddings(file_path)
+                
+                if file_embeddings and len(file_embeddings) > 0:
+                    # Add to our lists
+                    ds.extend(file_embeddings)
+                    all_images.extend(images)
+                    
+                    print(f"Loaded {len(file_embeddings)} existing embeddings")
+                else:
+                    print(f"Failed to load embeddings, will regenerate")
+                    # Fall back to generating new embeddings
+                    process_new_file(f, file_path, ds, all_images)
+            else:
+                print(f"No existing embeddings for {filename}, generating new ones")
+                # Process the file normally
+                process_new_file(f, file_path, ds, all_images)
+                
+        return f"Processed {len(files)} files with {len(ds)} total embeddings", ds, all_images
+    except Exception as e:
+        import traceback
+        traceback_str = traceback.format_exc()
+        return f"Error in indexing: {str(e)}\n{traceback_str}", ds, []
+
+
+# Add this new function
+def process_new_file(f, file_path, ds, all_images):
+    """Process a file by generating new embeddings and saving them"""
+    try:
+        # Convert file to images
+        images = convert_files([f])
+        
+        if not images:
+            print(f"Could not convert {os.path.basename(file_path)} to images")
+            return
+            
+        # Get embeddings for this file only
+        file_ds = []
+        status, file_ds, _ = index_gpu(images, file_ds)
+        
+        # Save the new embeddings if successful
+        if file_ds and len(file_ds) > 0:
+            saved = db.save_embeddings(file_path, file_ds, len(images))
+            if saved:
+                print(f"Saved {len(file_ds)} new embeddings for {os.path.basename(file_path)}")
+            else:
+                print(f"Failed to save embeddings for {os.path.basename(file_path)}")
+            
+            # Add to our complete lists
+            ds.extend(file_ds)
+            all_images.extend(images)
+        else:
+            print(f"Failed to generate embeddings for {os.path.basename(file_path)}")
+    except Exception as e:
+        print(f"Error processing new file {os.path.basename(file_path)}: {e}")
+
+# Modified index_gpu function (keeping the core functionality the same)
 @spaces.GPU
 def index_gpu(images, ds):
     """Example script to run inference with ColPali (ColQwen2)"""
@@ -341,7 +438,6 @@ def index_gpu(images, ds):
         import traceback
         traceback_str = traceback.format_exc()
         return f"Error in processing: {str(e)}\n{traceback_str}", ds, []
-
 
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
     gr.Markdown("# ColPali: Efficient Document Retrieval with Vision Language Models (ColQwen2) 📚")
