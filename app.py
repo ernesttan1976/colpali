@@ -25,6 +25,7 @@ MODEL_DIR = "./models/colqwen2"
 MODEL_PATH = os.path.join(MODEL_DIR, "model")
 PROCESSOR_PATH = os.path.join(MODEL_DIR, "processor")
 
+PAGE_LIMIT=150
 
 @spaces.GPU
 def install_fa2():
@@ -304,7 +305,7 @@ def convert_files(files):
             # Continue with other files rather than failing completely
             continue
 
-    if len(images) >= 150:
+    if len(images) > PAGE_LIMIT:
         raise gr.Error("The number of images in the dataset should be less than 150.")
     
     if not images:
