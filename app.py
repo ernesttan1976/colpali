@@ -34,7 +34,7 @@ MODEL_DIR = "./models/colqwen2"
 MODEL_PATH = os.path.join(MODEL_DIR, "model")
 PROCESSOR_PATH = os.path.join(MODEL_DIR, "processor")
 
-PAGE_LIMIT=150
+PAGE_LIMIT=800
 
 @spaces.GPU
 def install_fa2():
@@ -440,16 +440,17 @@ def index_gpu(images, ds):
         return f"Error in processing: {str(e)}\n{traceback_str}", ds, []
 
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# ColPali: Efficient Document Retrieval with Vision Language Models (ColQwen2) 📚")
-    gr.Markdown("""Demo to test ColQwen2 (ColPali) on PDF documents. 
-    ColPali is model implemented from the [ColPali paper](https://arxiv.org/abs/2407.01449).
-
-    This demo allows you to upload PDF files and search for the most relevant pages based on your query.
-    Refresh the page if you change documents !
-
-    ⚠️ This demo uses a model trained exclusively on A4 PDFs in portrait mode, containing english text. Performance is expected to drop for other page formats and languages.
-    Other models will be released with better robustness towards different languages and document formats !
-    """)
+    gr.Markdown("# RAG for Highly Graphical PDF Documents")
+    gr.Markdown(""" ## Problem: ## 
+                Typical RAG fails for highly graphical documents. 
+                ## Solution ##
+                The ColPali model's results are promising! 
+                1. ColPali's strategy is to ingest each pdf page as an image. 
+                2. These embeddings are stored in a LanceDB embeddings database for persistence.
+                3. The query is first sent to the Colpali model, returning responses in the form of images with page number.
+                4. This is then passed on to an external AI like OpenAI gpt-4o-mini to get the final response.
+                """)
+    
     with gr.Row():
         with gr.Column(scale=2):
             gr.Markdown("## 1️⃣ Upload PDFs")
@@ -474,6 +475,17 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
 
     convert_button.click(index, inputs=[file, embeds], outputs=[message, embeds, imgs])
     search_button.click(search, inputs=[query, embeds, imgs, k, api_key], outputs=[output_gallery, output_text])
+
+    gr.Markdown("# ColPali: Efficient Document Retrieval with Vision Language Models (ColQwen2) 📚")
+    gr.Markdown("""Demo to test ColQwen2 (ColPali) on PDF documents. 
+    ColPali is model implemented from the [ColPali paper](https://arxiv.org/abs/2407.01449).
+
+    This demo allows you to upload PDF files and search for the most relevant pages based on your query.
+    Refresh the page if you change documents !
+
+    ⚠️ This demo uses a model trained exclusively on A4 PDFs in portrait mode, containing english text. Performance is expected to drop for other page formats and languages.
+    Other models will be released with better robustness towards different languages and document formats !
+    """)
 
 if __name__ == "__main__":
     # Use a simpler launch method to avoid compatibility issues
