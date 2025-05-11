@@ -214,7 +214,7 @@ def query_gpt4o_mini(query, images, api_key):
                     } for im in base64_images]
                 }
               ],
-              max_tokens=500,
+              max_tokens=8000,
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -441,15 +441,19 @@ def index_gpu(images, ds):
 
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
     gr.Markdown("# RAG for Highly Graphical PDF Documents")
-    gr.Markdown(""" ## Problem: ## 
-                Typical RAG fails for highly graphical documents. 
-                ## Solution ##
-                The ColPali model's results are promising! 
-                1. ColPali's strategy is to ingest each pdf page as an image. 
-                2. These embeddings are stored in a LanceDB embeddings database for persistence.
-                3. The query is first sent to the Colpali model, returning responses in the form of images with page number.
-                4. This is then passed on to an external AI like OpenAI gpt-4o-mini to get the final response.
-                """)
+    with gr.Accordion("Details:", open=False):
+        with gr.Row():
+            with gr.Column(scale=1):
+                gr.Markdown(""" ## Problem: ## 
+                            Typical RAG fails for highly graphical documents.""")
+            with gr.Column(scale=1):
+                gr.Markdown(""" ## Solution ##
+                    The ColPali model's results are promising! 
+                    1. ColPali's strategy is to ingest each pdf page as an image. 
+                    2. These embeddings are stored in a LanceDB embeddings database for persistence.
+                    3. The query is first sent to the Colpali model, returning responses in the form of images with page number.
+                    4. This is then passed on to an external AI like OpenAI gpt-4o-mini to get the final response.
+                    """)
     
     with gr.Row():
         with gr.Column(scale=2):
@@ -470,22 +474,23 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
 
     # Define the actions
     search_button = gr.Button("🔍 Search", variant="primary")
-    output_gallery = gr.Gallery(label="Retrieved Documents", height=600, show_label=True)
-    output_text = gr.Textbox(label="AI Response", placeholder="Generated response based on retrieved documents")
+    output_gallery = gr.Gallery(label="Retrieved Documents", height=800, show_label=True, show_share_button=True, columns=[5], rows=[1], object_fit="contain")
+    output_text = gr.Textbox(label="AI Response", placeholder="Generated response based on retrieved documents", show_copy_button=True)
 
     convert_button.click(index, inputs=[file, embeds], outputs=[message, embeds, imgs])
     search_button.click(search, inputs=[query, embeds, imgs, k, api_key], outputs=[output_gallery, output_text])
 
-    gr.Markdown("# ColPali: Efficient Document Retrieval with Vision Language Models (ColQwen2) 📚")
-    gr.Markdown("""Demo to test ColQwen2 (ColPali) on PDF documents. 
-    ColPali is model implemented from the [ColPali paper](https://arxiv.org/abs/2407.01449).
+    with gr.Accordion("Acknowledgements:", open=False):
+        gr.Markdown("# ColPali: Efficient Document Retrieval with Vision Language Models (ColQwen2) 📚")
+        gr.Markdown("""Demo to test ColQwen2 (ColPali) on PDF documents. 
+        ColPali is model implemented from the [ColPali paper](https://arxiv.org/abs/2407.01449).
 
-    This demo allows you to upload PDF files and search for the most relevant pages based on your query.
-    Refresh the page if you change documents !
+        This demo allows you to upload PDF files and search for the most relevant pages based on your query.
+        Refresh the page if you change documents !
 
-    ⚠️ This demo uses a model trained exclusively on A4 PDFs in portrait mode, containing english text. Performance is expected to drop for other page formats and languages.
-    Other models will be released with better robustness towards different languages and document formats !
-    """)
+        ⚠️ This demo uses a model trained exclusively on A4 PDFs in portrait mode, containing english text. Performance is expected to drop for other page formats and languages.
+        Other models will be released with better robustness towards different languages and document formats !
+        """)
 
 if __name__ == "__main__":
     # Use a simpler launch method to avoid compatibility issues
