@@ -2,6 +2,7 @@ import os
 import spaces
 import base64
 from io import BytesIO
+import io
 
 import gradio as gr
 import torch
@@ -16,6 +17,9 @@ from colpali_engine.models import ColQwen2, ColQwen2Processor
 import sys
 
 from db import DocumentEmbeddingDatabase
+
+import zipfile
+from datetime import datetime
 
 # Create the directory for the embeddings database if it doesn't exist
 os.makedirs("./data/embeddings_db", exist_ok=True)
@@ -35,6 +39,63 @@ MODEL_PATH = os.path.join(MODEL_DIR, "model")
 PROCESSOR_PATH = os.path.join(MODEL_DIR, "processor")
 
 PAGE_LIMIT=800
+
+def create_zip_for_download(query, response, images):
+    """
+    Create a zip file containing the query, response, and retrieved images.
+    
+    Args:
+        query (str): The user's query
+        response (str): The AI's response to the query
+        images (list): List of (image, caption) tuples from the search results
+        
+    Returns:
+        bytes: The zip file as bytes
+    """
+    # Create an in-memory zip file
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Create markdown file with query and response
+        markdown_content = f"# Query\n\n{query}\n\n# AI Response\n\n{response}"
+        zip_file.writestr("query_response.md", markdown_content)
+        
+        # Add images to zip file
+        for i, (image, caption) in enumerate(images):
+            # Save image to bytes
+            img_buffer = io.BytesIO()
+            image.save(img_buffer, format="JPEG")
+            img_buffer.seek(0)
+            
+            # Add to zip with caption as part of filename
+            clean_caption = caption.replace('/', '_').replace('\\', '_')
+            zip_file.writestr(f"image_{i+1}_{clean_caption}.jpg", img_buffer.getvalue())
+    
+    # Return the zip file as bytes
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
+
+def create_download_link(query, response, images):
+    """
+    Create a download link for the zip file.
+    
+    Args:
+        query (str): The user's query
+        response (str): The AI's response to the query
+        images (list): List of (image, caption) tuples from the search results
+        
+    Returns:
+        tuple: (filename, mime_type, data)
+    """
+    # Generate timestamp for filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"ai_visionllm_colpali_{timestamp}.zip"
+    
+    # Create zip file
+    zip_data = create_zip_for_download(query, response, images)
+    
+    return (filename, "application/zip", zip_data)
+
 
 @spaces.GPU
 def install_fa2():
@@ -223,6 +284,43 @@ def query_gpt4o_mini(query, images, api_key):
     return "Enter your OpenAI API key to get a custom response"
 
 
+# Add this function to app.py before the search function
+def create_zip_for_download(query, response, images):
+    """
+    Create a zip file containing the query, response, and retrieved images.
+    
+    Args:
+        query (str): The user's query
+        response (str): The AI's response to the query
+        images (list): List of (image, caption) tuples from the search results
+        
+    Returns:
+        bytes: The zip file as bytes
+    """
+    # Create an in-memory zip file
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Create markdown file with query and response
+        markdown_content = f"# Query\n\n{query}\n\n# AI Response\n\n{response}"
+        zip_file.writestr("query_response.md", markdown_content)
+        
+        # Add images to zip file
+        for i, (image, caption) in enumerate(images):
+            # Save image to bytes
+            img_buffer = io.BytesIO()
+            image.save(img_buffer, format="JPEG")
+            img_buffer.seek(0)
+            
+            # Add to zip with caption as part of filename
+            clean_caption = caption.replace('/', '_').replace('\\', '_')
+            zip_file.writestr(f"image_{i+1}_{clean_caption}.jpg", img_buffer.getvalue())
+    
+    # Return the zip file as bytes
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
+
+# Modify the search function to correctly format the return value for Gradio File component
 @spaces.GPU
 def search(query: str, ds, images, k, api_key):
     try:
@@ -248,11 +346,40 @@ def search(query: str, ds, images, k, api_key):
         # Generate response from GPT-4o-mini
         ai_response = query_gpt4o_mini(query, results, api_key)
 
-        return results, ai_response
+        # Create download data
+        download_data = None
+        if results and ai_response:
+            try:
+                # Create timestamp for download filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"colpali_results_{timestamp}.zip"
+                
+                # Create the temporary file path where we'll save the zip
+                import tempfile
+                temp_dir = os.path.join(tempfile.gettempdir(), "colpali_downloads")
+                os.makedirs(temp_dir, exist_ok=True)
+                temp_zip_path = os.path.join(temp_dir, filename)
+                
+                # Create zip file content
+                zip_data = create_zip_for_download(query, ai_response, results)
+                
+                # Write to temp file
+                with open(temp_zip_path, "wb") as f:
+                    f.write(zip_data)
+                
+                # Return the file path for Gradio File component
+                download_data = temp_zip_path
+            except Exception as e:
+                print(f"Error creating download file: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        return results, ai_response, download_data
     except Exception as e:
-        return [], f"Error in search function: {str(e)}"
-
-
+        import traceback
+        error_msg = f"Error in search function: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
+        return [], error_msg, None
 
 def convert_files(files):
     """Convert uploaded files to images, handling different file types from Gradio."""
@@ -439,6 +566,7 @@ def index_gpu(images, ds):
         traceback_str = traceback.format_exc()
         return f"Error in processing: {str(e)}\n{traceback_str}", ds, []
 
+# Update the Gradio UI section for better file handling
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
     gr.Markdown("# RAG for Highly Graphical PDF Documents")
     with gr.Accordion("Details:", open=False):
@@ -470,15 +598,29 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             gr.Markdown("## 2️⃣ Search")
             query = gr.Textbox(placeholder="Enter your query here", label="Query")
             k = gr.Slider(minimum=1, maximum=10, step=1, label="Number of results", value=5)
+            search_button = gr.Button("🔍 Search", variant="primary")
 
-
-    # Define the actions
-    search_button = gr.Button("🔍 Search", variant="primary")
+    # Define the outputs first
     output_gallery = gr.Gallery(label="Retrieved Documents", height=800, show_label=True, show_share_button=True, columns=[5], rows=[1], object_fit="contain")
     output_text = gr.Textbox(label="AI Response", placeholder="Generated response based on retrieved documents", show_copy_button=True)
+    download_file = gr.File(label="Download Results", visible=False)
 
+    # Define the actions
     convert_button.click(index, inputs=[file, embeds], outputs=[message, embeds, imgs])
-    search_button.click(search, inputs=[query, embeds, imgs, k, api_key], outputs=[output_gallery, output_text])
+    
+    # Update search button click
+    search_result = search_button.click(
+        search, 
+        inputs=[query, embeds, imgs, k, api_key], 
+        outputs=[output_gallery, output_text, download_file]
+    )
+    
+    # Show download file when search completes with results
+    search_result.then(
+        lambda file: gr.update(visible=file is not None),
+        [download_file],
+        download_file
+    )
 
     with gr.Accordion("Acknowledgements:", open=False):
         gr.Markdown("# ColPali: Efficient Document Retrieval with Vision Language Models (ColQwen2) 📚")
