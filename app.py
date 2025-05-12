@@ -37,8 +37,62 @@ print(f"CUDA version: {torch.version.cuda}")
 MODEL_DIR = "./models/colqwen2"
 MODEL_PATH = os.path.join(MODEL_DIR, "model")
 PROCESSOR_PATH = os.path.join(MODEL_DIR, "processor")
+MODEL_MARKER = os.path.join(MODEL_DIR, "model_loaded.marker")
 
 PAGE_LIMIT=800
+
+def verify_model_directories():
+    """Verify that model directories exist and are writable."""
+    print("=== Verifying Model Directories ===")
+    
+    # Ensure directories exist
+    os.makedirs(MODEL_PATH, exist_ok=True)
+    os.makedirs(PROCESSOR_PATH, exist_ok=True)
+    
+    print(f"MODEL_DIR: {MODEL_DIR} - Exists: {os.path.exists(MODEL_DIR)}")
+    print(f"MODEL_PATH: {MODEL_PATH} - Exists: {os.path.exists(MODEL_PATH)}")
+    print(f"PROCESSOR_PATH: {PROCESSOR_PATH} - Exists: {os.path.exists(PROCESSOR_PATH)}")
+    
+    # Verify we can write to these directories
+    try:
+        test_file_model = os.path.join(MODEL_PATH, 'test_write.tmp')
+        test_file_processor = os.path.join(PROCESSOR_PATH, 'test_write.tmp')
+        
+        with open(test_file_model, 'w') as f:
+            f.write('test')
+        with open(test_file_processor, 'w') as f:
+            f.write('test')
+            
+        # Clean up
+        os.remove(test_file_model)
+        os.remove(test_file_processor)
+        print("✅ Model directories are writable - volume mounting is working correctly")
+        return True
+    except Exception as e:
+        print(f"❌ Error: Cannot write to model directories. Docker volume may not be mounted correctly: {e}")
+        print("Please ensure that './models' directory exists and has proper permissions")
+        return False
+
+def check_model_persistence():
+    """Check if model persistence marker exists from previous runs."""
+    if os.path.exists(MODEL_MARKER):
+        with open(MODEL_MARKER, 'r') as f:
+            marker_content = f.read()
+            print(f"✅ Model persistence confirmed! Previous marker: {marker_content}")
+        return True
+    print("No model persistence marker found - this might be the first run")
+    return False
+
+def mark_model_loaded():
+    """Create a marker file indicating the model has been loaded successfully."""
+    try:
+        with open(MODEL_MARKER, 'w') as f:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"Model loaded successfully at {timestamp}")
+        print(f"Created model marker file at {MODEL_MARKER}")
+    except Exception as e:
+        print(f"Warning: Could not create model marker file: {e}")
+
 
 def create_zip_for_download(query, response, images):
     """
@@ -103,11 +157,16 @@ def install_fa2():
     os.system("pip install flash-attn --no-build-isolation")
 # install_fa2()
 
-
-# Replace the load_model function in app.py with this corrected version
 def load_model():
     """Load model from disk if available, otherwise download and save it."""
     try:
+        # Verify directories are properly set up before proceeding
+        if not verify_model_directories():
+            print("WARNING: Model directories verification failed, but will try to continue")
+        
+        # Check if model was previously loaded successfully
+        model_persistence = check_model_persistence()
+        
         os.makedirs(MODEL_DIR, exist_ok=True)
         print(f"Model directory: {MODEL_DIR}")
         print(f"Model directory exists: {os.path.exists(MODEL_DIR)}")
@@ -119,11 +178,23 @@ def load_model():
             print(f"CUDA device count: {torch.cuda.device_count()}")
             print(f"CUDA device name: {torch.cuda.get_device_name(0)}")
         
-        # Check more thoroughly if model exists
-        model_files_exist = os.path.exists(os.path.join(MODEL_PATH, "config.json"))
-        processor_files_exist = os.path.exists(os.path.join(PROCESSOR_PATH, "config.json"))
-        print(f"Model config exists: {model_files_exist}")
-        print(f"Processor config exists: {processor_files_exist}")
+        # Check if critical model files exist - any of these combinations are valid
+        model_files_exist = (
+            (os.path.exists(os.path.join(MODEL_PATH, "config.json"))) or
+            (os.path.exists(os.path.join(MODEL_PATH, "adapter_config.json")) and 
+             os.path.exists(os.path.join(MODEL_PATH, "adapter_model.safetensors")) and
+             os.path.exists(os.path.join(MODEL_PATH, "generation_config.json")))
+        )
+        
+        processor_files_exist = (
+            (os.path.exists(os.path.join(PROCESSOR_PATH, "config.json"))) or
+            (os.path.exists(os.path.join(PROCESSOR_PATH, "tokenizer_config.json")) and
+             os.path.exists(os.path.join(PROCESSOR_PATH, "tokenizer.json")) and
+             os.path.exists(os.path.join(PROCESSOR_PATH, "vocab.json")))
+        )
+        
+        print(f"Model files exist: {model_files_exist}")
+        print(f"Processor files exist: {processor_files_exist}")
         
         # List files in model directory to debug
         if os.path.exists(MODEL_PATH):
@@ -146,7 +217,7 @@ def load_model():
                     abs_model_path,
                     torch_dtype=torch.bfloat16,
                     device_map=device,
-                    local_files_only=False,
+                    local_files_only=True,  # Changed to True to force local loading
                     trust_remote_code=True,
                     revision=None  # Important: don't try to fetch remote info
                 )
@@ -165,6 +236,9 @@ def load_model():
                 model = model.eval()
                 print("Model ready!")
                 
+                # Mark that model was loaded successfully
+                mark_model_loaded()
+                
                 return model, processor
             except Exception as e:
                 print(f"Error loading model from disk: {e}")
@@ -179,7 +253,6 @@ def load_model():
         print(f"Exception in load_model: {e}")
         print(f"Exception type: {type(e)}")
         raise
-
 
 def download_model(device):
     print("Downloading model (first run only)...")
@@ -216,6 +289,10 @@ def download_model(device):
             print(f"Saving processor to {abs_processor_path}...")
             processor.save_pretrained(abs_processor_path)
             print(f"Processor saved successfully!")
+            
+            # Mark that model was loaded and saved successfully
+            mark_model_loaded()
+            
         except Exception as e:
             print(f"Error saving model to disk: {e}")
             print(f"Error type: {type(e)}")
@@ -225,6 +302,10 @@ def download_model(device):
         raise
     
     return model, processor
+
+# Verify model directories and persistence before loading
+verify_model_directories()
+check_model_persistence()
 
 # Load model and processor
 model, processor = load_model()
@@ -567,8 +648,8 @@ def index_gpu(images, ds):
         return f"Error in processing: {str(e)}\n{traceback_str}", ds, []
 
 # Update the Gradio UI section for better file handling
-with gr.Blocks(theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# RAG for Highly Graphical PDF Documents")
+with gr.Blocks(title="RTFM",theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# ®️etrieval For Technical Ⓜ️anuals (RTFM) 😜")
     with gr.Accordion("Details:", open=False):
         with gr.Row():
             with gr.Column(scale=1):

@@ -21,3 +21,4 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu, utility, compute]
+    restart: unless-stopped
