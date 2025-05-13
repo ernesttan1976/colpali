@@ -3,6 +3,7 @@ import spaces
 import base64
 from io import BytesIO
 import io
+import requests
 
 import gradio as gr
 import torch
@@ -37,8 +38,68 @@ print(f"CUDA version: {torch.version.cuda}")
 MODEL_DIR = "./models/colqwen2"
 MODEL_PATH = os.path.join(MODEL_DIR, "model")
 PROCESSOR_PATH = os.path.join(MODEL_DIR, "processor")
+MODEL_MARKER = os.path.join(MODEL_DIR, "model_loaded.marker")
 
-PAGE_LIMIT=800
+PAGE_LIMIT = 800
+
+# LLM Provider options for the dropdown
+LLM_PROVIDERS = [
+    "OpenAI GPT-4o-mini",
+    "Anthropic Claude 3.7 Sonnet"
+]
+
+def verify_model_directories():
+    """Verify that model directories exist and are writable."""
+    print("=== Verifying Model Directories ===")
+    
+    # Ensure directories exist
+    os.makedirs(MODEL_PATH, exist_ok=True)
+    os.makedirs(PROCESSOR_PATH, exist_ok=True)
+    
+    print(f"MODEL_DIR: {MODEL_DIR} - Exists: {os.path.exists(MODEL_DIR)}")
+    print(f"MODEL_PATH: {MODEL_PATH} - Exists: {os.path.exists(MODEL_PATH)}")
+    print(f"PROCESSOR_PATH: {PROCESSOR_PATH} - Exists: {os.path.exists(PROCESSOR_PATH)}")
+    
+    # Verify we can write to these directories
+    try:
+        test_file_model = os.path.join(MODEL_PATH, 'test_write.tmp')
+        test_file_processor = os.path.join(PROCESSOR_PATH, 'test_write.tmp')
+        
+        with open(test_file_model, 'w') as f:
+            f.write('test')
+        with open(test_file_processor, 'w') as f:
+            f.write('test')
+            
+        # Clean up
+        os.remove(test_file_model)
+        os.remove(test_file_processor)
+        print("✅ Model directories are writable - volume mounting is working correctly")
+        return True
+    except Exception as e:
+        print(f"❌ Error: Cannot write to model directories. Docker volume may not be mounted correctly: {e}")
+        print("Please ensure that './models' directory exists and has proper permissions")
+        return False
+
+def check_model_persistence():
+    """Check if model persistence marker exists from previous runs."""
+    if os.path.exists(MODEL_MARKER):
+        with open(MODEL_MARKER, 'r') as f:
+            marker_content = f.read()
+            print(f"✅ Model persistence confirmed! Previous marker: {marker_content}")
+        return True
+    print("No model persistence marker found - this might be the first run")
+    return False
+
+def mark_model_loaded():
+    """Create a marker file indicating the model has been loaded successfully."""
+    try:
+        with open(MODEL_MARKER, 'w') as f:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"Model loaded successfully at {timestamp}")
+        print(f"Created model marker file at {MODEL_MARKER}")
+    except Exception as e:
+        print(f"Warning: Could not create model marker file: {e}")
+
 
 def create_zip_for_download(query, response, images):
     """
@@ -75,39 +136,23 @@ def create_zip_for_download(query, response, images):
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
 
-def create_download_link(query, response, images):
-    """
-    Create a download link for the zip file.
-    
-    Args:
-        query (str): The user's query
-        response (str): The AI's response to the query
-        images (list): List of (image, caption) tuples from the search results
-        
-    Returns:
-        tuple: (filename, mime_type, data)
-    """
-    # Generate timestamp for filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"ai_visionllm_colpali_{timestamp}.zip"
-    
-    # Create zip file
-    zip_data = create_zip_for_download(query, response, images)
-    
-    return (filename, "application/zip", zip_data)
-
 
 @spaces.GPU
 def install_fa2():
     print("Install FA2")
     os.system("pip install flash-attn --no-build-isolation")
-# install_fa2()
+# install_fa2()  # Disabled for Docker
 
-
-# Replace the load_model function in app.py with this corrected version
 def load_model():
     """Load model from disk if available, otherwise download and save it."""
     try:
+        # Verify directories are properly set up before proceeding
+        if not verify_model_directories():
+            print("WARNING: Model directories verification failed, but will try to continue")
+        
+        # Check if model was previously loaded successfully
+        model_persistence = check_model_persistence()
+        
         os.makedirs(MODEL_DIR, exist_ok=True)
         print(f"Model directory: {MODEL_DIR}")
         print(f"Model directory exists: {os.path.exists(MODEL_DIR)}")
@@ -119,11 +164,23 @@ def load_model():
             print(f"CUDA device count: {torch.cuda.device_count()}")
             print(f"CUDA device name: {torch.cuda.get_device_name(0)}")
         
-        # Check more thoroughly if model exists
-        model_files_exist = os.path.exists(os.path.join(MODEL_PATH, "config.json"))
-        processor_files_exist = os.path.exists(os.path.join(PROCESSOR_PATH, "config.json"))
-        print(f"Model config exists: {model_files_exist}")
-        print(f"Processor config exists: {processor_files_exist}")
+        # Check if critical model files exist - any of these combinations are valid
+        model_files_exist = (
+            (os.path.exists(os.path.join(MODEL_PATH, "config.json"))) or
+            (os.path.exists(os.path.join(MODEL_PATH, "adapter_config.json")) and 
+             os.path.exists(os.path.join(MODEL_PATH, "adapter_model.safetensors")) and
+             os.path.exists(os.path.join(MODEL_PATH, "generation_config.json")))
+        )
+        
+        processor_files_exist = (
+            (os.path.exists(os.path.join(PROCESSOR_PATH, "config.json"))) or
+            (os.path.exists(os.path.join(PROCESSOR_PATH, "tokenizer_config.json")) and
+             os.path.exists(os.path.join(PROCESSOR_PATH, "tokenizer.json")) and
+             os.path.exists(os.path.join(PROCESSOR_PATH, "vocab.json")))
+        )
+        
+        print(f"Model files exist: {model_files_exist}")
+        print(f"Processor files exist: {processor_files_exist}")
         
         # List files in model directory to debug
         if os.path.exists(MODEL_PATH):
@@ -146,7 +203,7 @@ def load_model():
                     abs_model_path,
                     torch_dtype=torch.bfloat16,
                     device_map=device,
-                    local_files_only=False,
+                    local_files_only=True,  # Changed to True to force local loading
                     trust_remote_code=True,
                     revision=None  # Important: don't try to fetch remote info
                 )
@@ -165,6 +222,9 @@ def load_model():
                 model = model.eval()
                 print("Model ready!")
                 
+                # Mark that model was loaded successfully
+                mark_model_loaded()
+                
                 return model, processor
             except Exception as e:
                 print(f"Error loading model from disk: {e}")
@@ -179,7 +239,6 @@ def load_model():
         print(f"Exception in load_model: {e}")
         print(f"Exception type: {type(e)}")
         raise
-
 
 def download_model(device):
     print("Downloading model (first run only)...")
@@ -216,6 +275,10 @@ def download_model(device):
             print(f"Saving processor to {abs_processor_path}...")
             processor.save_pretrained(abs_processor_path)
             print(f"Processor saved successfully!")
+            
+            # Mark that model was loaded and saved successfully
+            mark_model_loaded()
+            
         except Exception as e:
             print(f"Error saving model to disk: {e}")
             print(f"Error type: {type(e)}")
@@ -226,6 +289,10 @@ def download_model(device):
     
     return model, processor
 
+# Verify model directories and persistence before loading
+verify_model_directories()
+check_model_persistence()
+
 # Load model and processor
 model, processor = load_model()
 
@@ -235,94 +302,192 @@ def encode_image_to_base64(image):
     buffered = BytesIO()
     image.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+
+def query_claude(query, images, api_key):
+    """Calls Anthropic's Claude 3.7 Sonnet with the query and image data."""
+
+    if not api_key or not api_key.startswith("sk-ant"):
+        return "Enter your Anthropic API key to get a response from Claude 3.7 Sonnet"
     
+    try:
+        # Format the Claude prompt
+        CLAUDE_PROMPT = """
+        You are a smart assistant designed to answer questions about a PDF document.
+        You are given relevant information in the form of PDF pages. Use them to construct a detailed response to the question, and cite your sources (page numbers, etc).
+        If it is not possible to answer using the provided pages, do not attempt to provide an answer and simply say the answer is not present within the documents.
+        Give detailed and extensive answers, only containing info in the pages you are given.
+        You can answer using information contained in plots and figures if necessary.
+        Answer in the same language as the query.
+        
+        Query: {query}
+        PDF pages:
+        """
+        
+        # Create the Anthropic API request
+        url = "https://api.anthropic.com/v1/messages"
+        headers = {
+            "x-api-key": api_key.strip(),
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+        }
+        
+        # Prepare the message content with text and images
+        content = [
+            {"type": "text", "text": CLAUDE_PROMPT.format(query=query)}
+        ]
+        
+        # Add images to the content
+        for i, (image, caption) in enumerate(images):
+            buffered = BytesIO()
+            image.save(buffered, format="JPEG")
+            img_bytes = buffered.getvalue()
+            img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+            
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": img_base64
+                }
+            })
+            
+            # Add caption as text after each image
+            content.append({
+                "type": "text",
+                "text": f"\n{caption}\n"
+            })
+        
+        # Construct the final request payload
+        data = {
+            "model": "claude-3-7-sonnet-20250219",
+            "max_tokens": 4000,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": content
+                }
+            ]
+        }
+        
+        # Send the request to Anthropic
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        
+        return result["content"][0]["text"]
+    
+    except Exception as e:
+        return f"Anthropic API connection failure. Error: {e}"
+
 
 def query_gpt4o_mini(query, images, api_key):
     """Calls OpenAI's GPT-4o-mini with the query and image data."""
 
-    if api_key and api_key.startswith("sk"):
-        try:
-            from openai import OpenAI
+    if not api_key or not api_key.startswith("sk-"):
+        return "Enter your OpenAI API key to get a response from GPT-4o-mini"
+    
+    try:
+        from openai import OpenAI
+    
+        base64_images = [encode_image_to_base64(image[0]) for image in images]
+        client = OpenAI(api_key=api_key.strip())
+        PROMPT = """
+        You are a smart assistant designed to answer questions about a PDF document.
+        You are given relevant information in the form of PDF pages. Use them to construct a detailed response to the question, and cite your sources (page numbers, etc).
+        If it is not possible to answer using the provided pages, do not attempt to provide an answer and simply say the answer is not present within the documents.
+        Give detailed and extensive answers, only containing info in the pages you are given.
+        You can answer using information contained in plots and figures if necessary.
+        Answer in the same language as the query.
         
-            base64_images = [encode_image_to_base64(image[0]) for image in images]
-            client = OpenAI(api_key=api_key.strip())
-            PROMPT = """
-            You are a smart assistant designed to answer questions about a PDF document.
-            You are given relevant information in the form of PDF pages. Use them to construct a short response to the question, and cite your sources (page numbers, etc).
-            If it is not possible to answer using the provided pages, do not attempt to provide an answer and simply say the answer is not present within the documents.
-            Give detailed and extensive answers, only containing info in the pages you are given.
-            You can answer using information contained in plots and figures if necessary.
-            Answer in the same language as the query.
-            
-            Query: {query}
-            PDF pages:
-            """
-        
-            response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
+        Query: {query}
+        PDF pages:
+        """
+    
+        response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+              "role": "user",
+              "content": [
                 {
-                  "role": "user",
-                  "content": [
-                    {
-                      "type": "text",
-                      "text": PROMPT.format(query=query)
-                    }] + [{
-                      "type": "image_url",
-                      "image_url": {
-                        "url": f"data:image/jpeg;base64,{im}"
-                        },
-                    } for im in base64_images]
-                }
-              ],
-              max_tokens=8000,
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            return f"OpenAI API connection failure. Error: {e}"
-        
-    return "Enter your OpenAI API key to get a custom response"
+                  "type": "text",
+                  "text": PROMPT.format(query=query)
+                }] + [{
+                  "type": "image_url",
+                  "image_url": {
+                    "url": f"data:image/jpeg;base64,{im}"
+                    },
+                } for im in base64_images]
+            }
+          ],
+          max_tokens=8000,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"OpenAI API connection failure. Error: {e}"
 
 
-# Add this function to app.py before the search function
-def create_zip_for_download(query, response, images):
+def parse_api_keys(api_key_input):
     """
-    Create a zip file containing the query, response, and retrieved images.
+    Parse API key input that might contain multiple keys in format:
+    openai:sk-xxx|anthropic:sk-ant-xxx or just a single key
+    
+    Returns a dictionary of provider:key pairs
+    """
+    api_keys = {}
+    
+    if '|' in api_key_input:
+        for key_pair in api_key_input.split('|'):
+            if ':' in key_pair:
+                provider, key = key_pair.split(':', 1)
+                api_keys[provider.strip().lower()] = key.strip()
+    else:
+        # Try to determine the provider based on key format
+        key = api_key_input.strip()
+        if key.startswith('sk-ant'):
+            api_keys['anthropic'] = key
+        elif key.startswith('sk-'):
+            api_keys['openai'] = key
+    
+    return api_keys
+
+
+def query_llm(query, images, api_key_input, llm_provider):
+    """
+    Route the query to the appropriate LLM based on the selected provider.
     
     Args:
         query (str): The user's query
-        response (str): The AI's response to the query
         images (list): List of (image, caption) tuples from the search results
+        api_key_input (str): The API key for the selected provider
+        llm_provider (str): The provider/model to use
         
     Returns:
-        bytes: The zip file as bytes
+        str: The LLM's response
     """
-    # Create an in-memory zip file
-    zip_buffer = io.BytesIO()
+    # Parse API keys
+    api_keys = parse_api_keys(api_key_input)
     
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        # Create markdown file with query and response
-        markdown_content = f"# Query\n\n{query}\n\n# AI Response\n\n{response}"
-        zip_file.writestr("query_response.md", markdown_content)
+    # Handle the routing based on provider
+    if llm_provider == "OpenAI GPT-4o-mini":
+        # Check if we have a specific OpenAI key
+        openai_key = api_keys.get('openai', api_key_input)
+        return query_gpt4o_mini(query, images, openai_key)
         
-        # Add images to zip file
-        for i, (image, caption) in enumerate(images):
-            # Save image to bytes
-            img_buffer = io.BytesIO()
-            image.save(img_buffer, format="JPEG")
-            img_buffer.seek(0)
-            
-            # Add to zip with caption as part of filename
-            clean_caption = caption.replace('/', '_').replace('\\', '_')
-            zip_file.writestr(f"image_{i+1}_{clean_caption}.jpg", img_buffer.getvalue())
-    
-    # Return the zip file as bytes
-    zip_buffer.seek(0)
-    return zip_buffer.getvalue()
+    elif llm_provider == "Anthropic Claude 3.7 Sonnet":
+        # Check if we have a specific Anthropic key
+        anthropic_key = api_keys.get('anthropic', api_key_input)
+        return query_claude(query, images, anthropic_key)
+        
+    else:
+        return f"Unknown LLM provider: {llm_provider}. Please select a valid option."
+
 
 # Modify the search function to correctly format the return value for Gradio File component
 @spaces.GPU
-def search(query: str, ds, images, k, api_key):
+def search(query: str, ds, images, k, api_key, llm_provider):
     try:
         k = min(k, len(ds))
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -343,8 +508,8 @@ def search(query: str, ds, images, k, api_key):
         for idx in top_k_indices:
             results.append((images[idx], f"Page {idx}"))
 
-        # Generate response from GPT-4o-mini
-        ai_response = query_gpt4o_mini(query, results, api_key)
+        # Generate response from the selected LLM
+        ai_response = query_llm(query, results, api_key, llm_provider)
 
         # Create download data
         download_data = None
@@ -429,7 +594,7 @@ def convert_files(files):
             continue
 
     if len(images) > PAGE_LIMIT:
-        raise gr.Error("The number of images in the dataset should be less than 150.")
+        raise gr.Error(f"The number of images in the dataset should be less than {PAGE_LIMIT}.")
     
     if not images:
         raise ValueError("No valid PDF files were processed. Please check your uploads.")
@@ -437,7 +602,6 @@ def convert_files(files):
     return images
 
 
-# Replace the existing index function with this version
 def index(files, ds):
     try:
         print("Converting files")
@@ -506,7 +670,6 @@ def index(files, ds):
         return f"Error in indexing: {str(e)}\n{traceback_str}", ds, []
 
 
-# Modify the process_new_file function
 def process_new_file(f, file_id, ds, all_images):
     """Process a file by generating new embeddings and saving them"""
     try:
@@ -536,6 +699,8 @@ def process_new_file(f, file_id, ds, all_images):
             print(f"Failed to generate embeddings for {file_id}")
     except Exception as e:
         print(f"Error processing new file {file_id}: {e}")
+        import traceback
+        traceback.print_exc()
         
 # Modified index_gpu function (keeping the core functionality the same)
 @spaces.GPU
@@ -567,8 +732,8 @@ def index_gpu(images, ds):
         return f"Error in processing: {str(e)}\n{traceback_str}", ds, []
 
 # Update the Gradio UI section for better file handling
-with gr.Blocks(theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# RAG for Highly Graphical PDF Documents")
+with gr.Blocks(theme=gr.themes.Glass(),title="RTFM") as demo:
+    gr.Markdown("# ®️etrieval For Technical Ⓜ️anuals (RTFM) 😜")
     with gr.Accordion("Details:", open=False):
         with gr.Row():
             with gr.Column(scale=1):
@@ -580,7 +745,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
                     1. ColPali's strategy is to ingest each pdf page as an image. 
                     2. These embeddings are stored in a LanceDB embeddings database for persistence.
                     3. The query is first sent to the Colpali model, returning responses in the form of images with page number.
-                    4. This is then passed on to an external AI like OpenAI gpt-4o-mini to get the final response.
+                    4. This is then passed on to your selected AI (OpenAI GPT-4o-mini or Anthropic Claude 3.7) to get the final response.
                     """)
     
     with gr.Row():
@@ -590,7 +755,24 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
 
             convert_button = gr.Button("🔄 Index documents")
             message = gr.Textbox("Files not yet uploaded", label="Status")
-            api_key = gr.Textbox(placeholder="Enter your OpenAI KEY here (optional)", label="API key", value=os.getenv('OPENAI_API_KEY', ''), type="password")
+            
+            # Create a dropdown for the LLM provider
+            llm_provider = gr.Dropdown(
+                choices=LLM_PROVIDERS,
+                label="Select AI Model for Response Generation",
+                value=LLM_PROVIDERS[0],
+                info="Choose which AI model will answer your questions using the retrieved PDF pages."
+            )
+            
+            # Add API key input with improved description
+            api_key = gr.Textbox(
+                placeholder="Enter API key(s): openai:sk-xxx|anthropic:sk-ant-xxx or just paste single key",
+                label="API key",
+                value=os.getenv('OPENAI_API_KEY','') if llm_provider==LLM_PROVIDERS[0] else os.getenv('ANTHROPIC_API_KEY', ''),
+                type="password",
+                info="Enter your OpenAI or Anthropic API key"
+            )
+            
             embeds = gr.State(value=[])
             imgs = gr.State(value=[])
 
@@ -608,13 +790,20 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     # Define the actions
     convert_button.click(index, inputs=[file, embeds], outputs=[message, embeds, imgs])
     
-    # Update search button click
+    # Update search button click to include the LLM provider
     search_result = search_button.click(
         search, 
-        inputs=[query, embeds, imgs, k, api_key], 
+        inputs=[query, embeds, imgs, k, api_key, llm_provider], 
         outputs=[output_gallery, output_text, download_file]
     )
     
+    # Add event listener to update API key when LLM provider changes
+    llm_provider.change(
+        fn=lambda provider: os.getenv('OPENAI_API_KEY', '') if provider == LLM_PROVIDERS[0] else os.getenv('ANTHROPIC_API_KEY', ''),
+        inputs=[llm_provider],
+        outputs=[api_key]
+    )
+        
     # Show download file when search completes with results
     search_result.then(
         lambda file: gr.update(visible=file is not None),
@@ -622,16 +811,28 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
         download_file
     )
 
+    with gr.Accordion("API Keys Usage:", open=False):
+        gr.Markdown("""
+        ## API Key Format
+        - For OpenAI GPT-4o-mini: Enter your OpenAI API key starting with `sk-`
+        - For Anthropic Claude 3.7: Enter your Anthropic API key starting with `sk-ant-`
+        
+        ## Combined Format (Optional)
+        You can provide both API keys in the format: `openai:sk-xxx|anthropic:sk-ant-xxx`
+        
+        This allows you to switch between models without changing the API key each time.
+        """)
+
     with gr.Accordion("Acknowledgements:", open=False):
         gr.Markdown("# ColPali: Efficient Document Retrieval with Vision Language Models (ColQwen2) 📚")
         gr.Markdown("""Demo to test ColQwen2 (ColPali) on PDF documents. 
         ColPali is model implemented from the [ColPali paper](https://arxiv.org/abs/2407.01449).
 
         This demo allows you to upload PDF files and search for the most relevant pages based on your query.
-        Refresh the page if you change documents !
+        Refresh the page if you change documents!
 
         ⚠️ This demo uses a model trained exclusively on A4 PDFs in portrait mode, containing english text. Performance is expected to drop for other page formats and languages.
-        Other models will be released with better robustness towards different languages and document formats !
+        Other models will be released with better robustness towards different languages and document formats!
         """)
 
 if __name__ == "__main__":
