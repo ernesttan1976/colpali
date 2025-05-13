@@ -751,7 +751,7 @@ with gr.Blocks(theme=gr.themes.Glass(),title="RTFM") as demo:
     with gr.Row():
         with gr.Column(scale=2):
             gr.Markdown("## 1️⃣ Upload PDFs")
-            file = gr.File(file_types=["pdf"], file_count="multiple", label="Upload PDFs")
+            file = gr.File(file_count="multiple", label="Upload PDFs")
 
             convert_button = gr.Button("🔄 Index documents")
             message = gr.Textbox("Files not yet uploaded", label="Status")
