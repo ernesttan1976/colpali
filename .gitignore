@@ -28,3 +28,4 @@ build/
 
 models/
 data/embeddings_db/
+dist*/
