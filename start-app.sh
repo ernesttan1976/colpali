@@ -1,10 +1,37 @@
 #!/bin/bash
 # Startup script for the ColPali Docker application
 
+# Check if running on Apple Silicon
+if [[ "$(uname -m)" == "arm64" && "$(uname)" == "Darwin" ]]; then
+    echo "=== Apple Silicon detected ==="
+    # Check if PyTorch with MPS is installed
+    PYTORCH_INSTALLED=$(pip list | grep torch || echo "not installed")
+    
+    if [[ "$PYTORCH_INSTALLED" == "not installed" ]]; then
+        echo "Installing PyTorch for Apple Silicon..."
+        pip install torch torchvision torchaudio
+    fi
+else
+    echo "=== Non-Apple Silicon platform detected ==="
+    # Use the CUDA version if running on a machine with NVIDIA GPU
+    if command -v nvidia-smi &> /dev/null; then
+        echo "NVIDIA GPU detected, using CUDA version of PyTorch"
+        pip install -r requirements.txt
+    else
+        echo "No NVIDIA GPU detected, using CPU version of PyTorch"
+        pip install torch torchvision torchaudio
+        pip install -r requirements.txt
+    fi
+fi
+
 # Check environment
 echo "=== System Information ==="
 uname -a
-nvidia-smi || echo "NVIDIA drivers not found or not accessible"
+if command -v nvidia-smi &> /dev/null; then
+    nvidia-smi
+else
+    echo "NVIDIA drivers not found or not accessible"
+fi
 
 # Verify CUDA
 echo "=== Running CUDA Verification ==="

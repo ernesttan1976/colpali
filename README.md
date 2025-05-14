@@ -1,13 +1,14 @@
----
-title: ColPali
-emoji: 🏃
-colorFrom: pink
-colorTo: green
-sdk: gradio
-sdk_version: 4.37.2
-app_file: app.py
-pinned: false
-short_description: Document Retrieval
----
+## Installation
 
-Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+1. Install poppler (for pdfs)
+   [Windows]
+   https://github.com/oschwartz10612/poppler-windows/releases/tag/v24.08.0-0
+
+[Mac]
+brew install poppler
+
+2. Install dependencies
+   python -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   python app.py
