@@ -896,14 +896,19 @@ with gr.Blocks(theme=gr.themes.Glass(), title="RTFM") as demo:
         with gr.Row():
             with gr.Column(scale=1):
                 gr.Markdown(""" ## Problem: ## 
-                            Typical RAG fails for highly graphical documents.""")
+                            Typical RAG fails for highly graphical documents.
+                            1. Can only parse text
+                            2. Poor understanding of graphical elements
+                            3. Typical AI chatbot at most can accept a few images or small documents. Unable to process manuals with hundreds of pages.
+                            4. No document persistence.
+                            """)
             with gr.Column(scale=1):
                 gr.Markdown(""" ## Solution ##
                     The ColPali model's results are promising! 
-                    1. ColPali's strategy is to ingest each pdf page as an image. 
-                    2. These embeddings are stored in a LanceDB embeddings database for persistence.
-                    3. The query is first sent to the Colpali model, returning responses in the form of images with page number.
-                    4. This is then passed on to your selected AI (OpenAI GPT-4o-mini or Anthropic Claude 3.7 or llama3.2-vision:11b) to get the final response.
+                    1. ColPali's strategy is to ingest each pdf page as an image. These embeddings are stored in a LanceDB embeddings database for persistence. The query is first sent to the Colpali model, returning responses in the form of images with page number.
+                    2. For the best result send the query to cloud AI (OpenAI GPT-4o-mini or Anthropic Claude 3.7) to get the final response.
+                    3. For privacy, send use local model (llama3.2-vision:11b) to get the final response.
+                    4. Save the result as a zip file for easy reference.
                     """)
 
     with gr.Row():
