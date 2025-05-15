@@ -50,7 +50,7 @@ MODEL_MARKER = os.path.join(MODEL_DIR, "model_loaded.marker")
 PAGE_LIMIT = 1000
 
 # LLM Provider options for the dropdown
-LLM_PROVIDERS = ["OpenAI GPT-4o-mini", "Anthropic Claude 3.7 Sonnet", "Ollama Qwen2.5-VL-7B"]
+LLM_PROVIDERS = ["OpenAI GPT-4o-mini", "Anthropic Claude 3.7 Sonnet", "Ollama llama3.2-vision:11b"]
 
 
 def verify_model_directories():
@@ -341,117 +341,90 @@ def encode_image_to_base64(image):
     image.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-def query_ollama(query, images, api_key=None):
-    """Calls Ollama's Qwen2.5-VL-7B-Instruct model using Ollama's native API."""
-    
-    try:
-        # Format the prompt
-        PROMPT = """
-        You are a smart assistant designed to answer questions about a PDF document.
-        You are given relevant information in the form of PDF pages. Use them to construct a detailed response to the question, and cite your sources (page numbers, etc).
-        If it is not possible to answer using the provided pages, do not attempt to provide an answer and simply say the answer is not present within the documents.
-        Give detailed and extensive answers, only containing info in the pages you are given.
-        You can answer using information contained in plots and figures if necessary.
-        Answer in the same language as the query.
-        
-        Query: {query}
-        PDF pages:
-        """.format(query=query)
-        
-        # Prepare base64 encoded images - resize them to reduce memory usage
-        base64_images = []
-        for img, caption in images:
-            # Resize image to a more manageable size (1000px max width/height)
-            max_size = 800
-            img_copy = img.copy()
-            if img_copy.width > max_size or img_copy.height > max_size:
-                # Calculate new dimensions while preserving aspect ratio
-                if img_copy.width > img_copy.height:
-                    new_width = max_size
-                    new_height = int(img_copy.height * (max_size / img_copy.width))
-                else:
-                    new_height = max_size
-                    new_width = int(img_copy.width * (max_size / img_copy.height))
-                
-                img_copy = img_copy.resize((new_width, new_height), Image.LANCZOS)
-            
-            # Convert to RGB if the image is RGBA (has transparency)
-            if img_copy.mode == 'RGBA':
-                img_copy = img_copy.convert('RGB')
-                
-            # Compress to JPEG with reduced quality
-            buffered = BytesIO()
-            img_copy.save(buffered, format="JPEG", quality=85)
-            img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-            base64_images.append(img_str)
-        
-        # Process only a limited number of images if there are too many
-        max_images = 3  # Limit to 3 images to avoid memory issues
-        if len(base64_images) > max_images:
-            print(f"Warning: Limiting from {len(base64_images)} to {max_images} images to avoid memory issues")
-            base64_images = base64_images[:max_images]
-        
-        # Create the payload for Ollama's native API
-        payload = {
-            "model": "bsahane/Qwen2.5-VL-7B-Instruct:Q4_K_M_benxh",
-            "prompt": PROMPT,
-            "images": base64_images,
-            "stream": False,
-            "options": {
-                "temperature": 0.7,
-                "num_predict": 2000  # Reduced token count
-            }
-        }
-        
-        # Print debug info
-        print(f"Sending request to Ollama with {len(base64_images)} images")
-        print(f"Using model: {payload['model']}")
-        
-        # Make the API call to Ollama's native API
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            headers={"Content-Type": "application/json"},
-            json=payload,
-            timeout=180  # Increase timeout for larger images
-        )
-        
-        # Handle response
-        if response.status_code != 200:
-            error_msg = f"Ollama API error: Status code {response.status_code} - {response.text}"
-            print(error_msg)
-            
-            # If we got an error and we have multiple images, try with just one image
-            if len(base64_images) > 1:
-                print("Retrying with only the first image...")
-                
-                # Update payload with only one image
-                payload["images"] = [base64_images[0]]
-                
-                # Try again with just one image
-                retry_response = requests.post(
-                    "http://localhost:11434/api/generate",
-                    headers={"Content-Type": "application/json"},
-                    json=payload,
-                    timeout=180
-                )
-                
-                if retry_response.status_code == 200:
-                    retry_result = retry_response.json()
-                    return f"Note: Only processed the first image due to memory constraints.\n\n{retry_result.get('response', 'No response')}"
-                else:
-                    return f"{error_msg}\n\nRetry also failed with status {retry_response.status_code} - {retry_response.text}"
-            
-            return error_msg
-            
-        result = response.json()
-        return result.get("response", "No response from Ollama")
-        
-    except Exception as e:
-        import traceback
-        error_msg = f"Ollama API connection failure: {str(e)}\n{traceback.format_exc()}"
-        print(error_msg)
-        return error_msg
+LLM_PROVIDERS = ["OpenAI GPT-4o-mini", "Anthropic Claude 3.7 Sonnet", "Ollama llama3.2-vision:11b"]
 
+def query_ollama(query, images, api_key=None):
+    """
+    Calls Ollama with the llama3.2-vision:11b model using direct HTTP requests,
+    processes one image at a time, and joins all responses into one comprehensive answer.
+    """
+    import requests
+    import json
+    import tempfile
+    import os
+    import base64
+    
+    all_responses = []
+    
+    for i, (img, caption) in enumerate(images):
+        try:
+            # Create a temporary directory for this single image
+            temp_dir = tempfile.mkdtemp()
+            temp_path = os.path.join(temp_dir, f"image_{i}.jpg")
+            img.save(temp_path, "JPEG")
+            
+            # Format the prompt
+            prompt = f"""You are a smart assistant designed to answer questions about a PDF document.
+You are given relevant information in the form of PDF pages. Use them to construct a detailed response to the question, and cite your sources (page numbers, etc).
+If it is not possible to answer using the provided pages, do not attempt to provide an answer and simply say the answer is not present within the documents.
+Give detailed and extensive answers, only containing info in the pages you are given.
+You can answer using information contained in plots and figures if necessary.
+Answer in the same language as the query.
+Query: {query}
+PDF page {i+1}: (see attached image)
+"""
+            
+            # Read and encode the single image
+            with open(temp_path, "rb") as img_file:
+                encoded = base64.b64encode(img_file.read()).decode('utf-8')
+            
+            # Create the payload for the API request with just one image
+            payload = {
+                "model": "llama3.2-vision:11b",
+                "prompt": prompt,
+                "images": [encoded],  # Just one image in the list
+                "stream": False,
+                "options": {
+                    "temperature": 0.7,
+                    "num_predict": 2048
+                }
+            }
+            
+            # Send the request to Ollama
+            response = requests.post(
+                "http://localhost:11434/api/generate",
+                headers={"Content-Type": "application/json"},
+                data=json.dumps(payload),
+                timeout=60
+            )
+            
+            # Clean up temporary files
+            try:
+                os.remove(temp_path)
+                os.rmdir(temp_dir)
+            except:
+                pass
+            
+            # Check if the request was successful
+            if response.status_code == 200:
+                result = response.json()
+                all_responses.append(f"--- Response for Page {i+1} ---\n{result.get('response', f'No content for page {i+1}')}")
+            else:
+                all_responses.append(f"Error for page {i+1}: Ollama returned status code {response.status_code}. Response: {response.text}")
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"Ollama API connection failure for page {i+1}. Error: {str(e)}\n{traceback.format_exc()}"
+            print(error_msg)  # Log the error for debugging
+            all_responses.append(error_msg)
+    
+    # Join all responses into one comprehensive answer
+    combined_response = "\n\n".join(all_responses)
+    
+    # Add a summary header
+    final_response = f"Combined Analysis for Query: {query}\n\n{combined_response}"
+    
+    return final_response
 def query_claude(query, images, api_key):
     """Calls Anthropic's Claude 3.7 Sonnet with the query and image data."""
 
@@ -618,7 +591,7 @@ def query_llm(query, images, api_key_input, llm_provider):
         # Check if we have a specific Anthropic key
         anthropic_key = api_keys.get("anthropic", api_key_input)
         return query_claude(query, images, anthropic_key)
-    elif llm_provider == "Ollama Qwen2.5-VL-7B":
+    elif llm_provider == "Ollama llama3.2-vision:11b":
         # Ollama doesn't need API key as it's running locally
         return query_ollama(query, images)
     else:
@@ -930,7 +903,7 @@ with gr.Blocks(theme=gr.themes.Glass(), title="RTFM") as demo:
                     1. ColPali's strategy is to ingest each pdf page as an image. 
                     2. These embeddings are stored in a LanceDB embeddings database for persistence.
                     3. The query is first sent to the Colpali model, returning responses in the form of images with page number.
-                    4. This is then passed on to your selected AI (OpenAI GPT-4o-mini or Anthropic Claude 3.7) to get the final response.
+                    4. This is then passed on to your selected AI (OpenAI GPT-4o-mini or Anthropic Claude 3.7 or llama3.2-vision:11b) to get the final response.
                     """)
 
     with gr.Row():
@@ -1002,7 +975,7 @@ with gr.Blocks(theme=gr.themes.Glass(), title="RTFM") as demo:
     llm_provider.change(
         fn=lambda provider: os.getenv("OPENAI_API_KEY", "") 
         if provider == LLM_PROVIDERS[0]
-        else "" if provider == "Ollama Qwen2.5-VL-7B"
+        else "" if provider == "Ollama llama3.2-vision:11b"
         else os.getenv("ANTHROPIC_API_KEY", ""),
         inputs=[llm_provider],
         outputs=[api_key],
@@ -1018,7 +991,7 @@ with gr.Blocks(theme=gr.themes.Glass(), title="RTFM") as demo:
             ## API Key Format
             - For OpenAI GPT-4o-mini: Enter your OpenAI API key starting with `sk-`
             - For Anthropic Claude 3.7: Enter your Anthropic API key starting with `sk-ant-`
-            - For Ollama Qwen2.5-VL-7B: No API key needed (uses localhost:11434)
+            - For Ollama llama3.2-vision:11b: No API key needed (uses localhost:11434)
             
             ## Combined Format (Optional)
             You can provide both API keys in the format: `openai:sk-xxx|anthropic:sk-ant-xxx`
