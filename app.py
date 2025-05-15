@@ -52,6 +52,14 @@ PAGE_LIMIT = 1000
 # LLM Provider options for the dropdown
 LLM_PROVIDERS = ["OpenAI GPT-4o-mini", "Anthropic Claude 3.7 Sonnet", "Ollama llama3.2-vision:11b"]
 
+def get_api_key(llm_provider):
+    index = LLM_PROVIDERS.index(llm_provider)
+    if index == 0:
+        return os.getenv("OPENAI_API_KEY","")
+    if index == 1:
+        return os.getenv("ANTHROPIC_API_KEY","")
+    if index == 2:
+        return ""
 
 def verify_model_directories():
     """Verify that model directories exist and are writable."""
@@ -851,6 +859,7 @@ def process_new_file(f, file_id, ds, all_images):
         traceback.print_exc()
 
 
+    
 # Modified index_gpu function (keeping the core functionality the same)
 @spaces.GPU
 def index_gpu(images, ds):
@@ -931,9 +940,7 @@ with gr.Blocks(theme=gr.themes.Glass(), title="RTFM") as demo:
             api_key = gr.Textbox(
                 placeholder="Enter API key(s): openai:sk-xxx|anthropic:sk-ant-xxx or just paste single key",
                 label="API key",
-                value=os.getenv("OPENAI_API_KEY", "")
-                if llm_provider == LLM_PROVIDERS[0]
-                else os.getenv("ANTHROPIC_API_KEY", ""),
+                value=get_api_key(llm_provider.value),
                 type="password",
                 info="Enter your OpenAI or Anthropic API key",
             )
