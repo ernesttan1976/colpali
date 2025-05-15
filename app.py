@@ -22,6 +22,7 @@ from db import DocumentEmbeddingDatabase
 import zipfile
 from datetime import datetime
 from dotenv import load_dotenv
+from image_cache import convert_files
 
 load_dotenv()
 
@@ -678,67 +679,67 @@ def search(query: str, ds, images, k, api_key, llm_provider):
         return [], error_msg, None
 
 
-def convert_files(files):
-    """Convert uploaded files to images, handling different file types from Gradio."""
-    images = []
+# def convert_files(files):
+#     """Convert uploaded files to images, handling different file types from Gradio."""
+#     images = []
 
-    for f in files:
-        try:
-            # Handle the file based on its type
-            if hasattr(f, "name"):
-                # This is likely a file object with a name attribute
-                file_path = f.name
-                print(f"Processing file with path: {file_path}")
-                images.extend(convert_from_path(file_path, thread_count=4))
-            elif isinstance(f, tuple) and len(f) == 2:
-                # If it's a tuple of (name, file-like object) as returned by some Gradio versions
-                temp_name, temp_file = f
-                print(f"Processing tuple with name: {temp_name}")
-                # If it's a file-like object, read it and convert from bytes
-                if hasattr(temp_file, "read"):
-                    file_content = temp_file.read()
-                    images.extend(convert_from_bytes(file_content, thread_count=4))
-                else:
-                    # If it's a path
-                    images.extend(convert_from_path(temp_file, thread_count=4))
-            elif isinstance(f, str):
-                # If it's directly a file path
-                print(f"Processing file path: {f}")
-                images.extend(convert_from_path(f, thread_count=4))
-            else:
-                # Try to get the file path from the object
-                print(f"Unknown file type: {type(f)}, trying to handle generically")
-                if hasattr(f, "file"):
-                    # Some Gradio versions provide a file attribute
-                    file_content = f.file.read()
-                    images.extend(convert_from_bytes(file_content, thread_count=4))
-                elif hasattr(f, "read"):
-                    # If it's a file-like object
-                    file_content = f.read()
-                    images.extend(convert_from_bytes(file_content, thread_count=4))
-                else:
-                    raise TypeError(
-                        f"Unsupported file type: {type(f)}. Please provide a valid PDF file."
-                    )
-        except Exception as e:
-            print(f"Error processing file {f}: {e}")
-            import traceback
+#     for f in files:
+#         try:
+#             # Handle the file based on its type
+#             if hasattr(f, "name"):
+#                 # This is likely a file object with a name attribute
+#                 file_path = f.name
+#                 print(f"Processing file with path: {file_path}")
+#                 images.extend(convert_from_path(file_path, thread_count=4))
+#             elif isinstance(f, tuple) and len(f) == 2:
+#                 # If it's a tuple of (name, file-like object) as returned by some Gradio versions
+#                 temp_name, temp_file = f
+#                 print(f"Processing tuple with name: {temp_name}")
+#                 # If it's a file-like object, read it and convert from bytes
+#                 if hasattr(temp_file, "read"):
+#                     file_content = temp_file.read()
+#                     images.extend(convert_from_bytes(file_content, thread_count=4))
+#                 else:
+#                     # If it's a path
+#                     images.extend(convert_from_path(temp_file, thread_count=4))
+#             elif isinstance(f, str):
+#                 # If it's directly a file path
+#                 print(f"Processing file path: {f}")
+#                 images.extend(convert_from_path(f, thread_count=4))
+#             else:
+#                 # Try to get the file path from the object
+#                 print(f"Unknown file type: {type(f)}, trying to handle generically")
+#                 if hasattr(f, "file"):
+#                     # Some Gradio versions provide a file attribute
+#                     file_content = f.file.read()
+#                     images.extend(convert_from_bytes(file_content, thread_count=4))
+#                 elif hasattr(f, "read"):
+#                     # If it's a file-like object
+#                     file_content = f.read()
+#                     images.extend(convert_from_bytes(file_content, thread_count=4))
+#                 else:
+#                     raise TypeError(
+#                         f"Unsupported file type: {type(f)}. Please provide a valid PDF file."
+#                     )
+#         except Exception as e:
+#             print(f"Error processing file {f}: {e}")
+#             import traceback
 
-            traceback.print_exc()
-            # Continue with other files rather than failing completely
-            continue
+#             traceback.print_exc()
+#             # Continue with other files rather than failing completely
+#             continue
 
-    if len(images) > PAGE_LIMIT:
-        raise gr.Error(
-            f"The number of images in the dataset should be less than {PAGE_LIMIT}."
-        )
+#     if len(images) > PAGE_LIMIT:
+#         raise gr.Error(
+#             f"The number of images in the dataset should be less than {PAGE_LIMIT}."
+#         )
 
-    if not images:
-        raise ValueError(
-            "No valid PDF files were processed. Please check your uploads."
-        )
+#     if not images:
+#         raise ValueError(
+#             "No valid PDF files were processed. Please check your uploads."
+#         )
 
-    return images
+#     return images
 
 
 def index(files, ds):
@@ -750,115 +751,96 @@ def index(files, ds):
         ds = []
         all_images = []
 
+        # Use the enhanced convert_files function that implements caching
+        try:
+            # This will use cached images when available
+            all_images = convert_files(files)
+            print(f"Successfully converted {len(all_images)} pages from {len(files)} files")
+        except Exception as e:
+            print(f"Error converting files: {e}")
+            import traceback
+            traceback.print_exc()
+            return f"Error converting files: {str(e)}", ds, []
+
+        # Process embeddings for each file
         for f in files:
-            # Get the file path and ensure we have a valid filename
+            # Get filename for identification
             if hasattr(f, "name"):
                 file_path = f.name
             elif isinstance(f, tuple) and len(f) == 2:
-                file_path = f[0]  # Use the name from the tuple
+                file_path = f[0]
             elif isinstance(f, str):
                 file_path = f
             else:
-                # Try other approaches to get the path
                 if hasattr(f, "file"):
                     file_path = str(f.file)
                 else:
-                    # Generate a temporary unique identifier if we can't get the path
                     import hashlib
-
-                    file_path = (
-                        f"unknown_file_{hashlib.md5(str(f).encode()).hexdigest()}"
-                    )
+                    file_path = f"unknown_file_{hashlib.md5(str(f).encode()).hexdigest()}"
 
             filename = os.path.basename(file_path)
-            print(f"Processing file: {filename} (path: {file_path})")
-
-            # Check if embeddings exist for this file - THIS USES ONLY THE FILENAME NOW
-            if db.embeddings_exist(
-                filename
-            ):  # <-- Change here: using filename instead of file_path
+            
+            # Check if embeddings exist for this file
+            if db.embeddings_exist(filename):
                 print(f"Loading existing embeddings for {filename}")
-
-                # Convert file to images for display only
-                try:
-                    images = convert_files([f])
-                    if not images:
-                        print(f"Could not convert {filename} to images")
-                        continue
-                except Exception as e:
-                    print(f"Error converting file to images: {e}")
-                    continue
-
+                
                 # Load embeddings from database using the filename
-                file_embeddings = db.load_embeddings(
-                    filename
-                )  # <-- Change here: using filename instead of file_path
-
+                file_embeddings = db.load_embeddings(filename)
+                
                 if file_embeddings and len(file_embeddings) > 0:
-                    # Add to our lists
+                    # Add to our embeddings list
                     ds.extend(file_embeddings)
-                    all_images.extend(images)
-
                     print(f"Loaded {len(file_embeddings)} existing embeddings")
                 else:
                     print(f"Failed to load embeddings, will regenerate")
                     # Fall back to generating new embeddings
-                    process_new_file(
-                        f, filename, ds, all_images
-                    )  # <-- Change here: using filename
+                    process_new_file(f, filename, ds, all_images)
             else:
                 print(f"No existing embeddings for {filename}, generating new ones")
                 # Process the file normally
-                process_new_file(
-                    f, filename, ds, all_images
-                )  # <-- Change here: using filename
+                process_new_file(f, filename, ds, all_images)
 
-        return (
-            f"Processed {len(files)} files with {len(ds)} total embeddings",
-            ds,
-            all_images,
-        )
+        return f"Processed {len(files)} files with {len(ds)} total embeddings", ds, all_images
     except Exception as e:
         import traceback
-
         traceback_str = traceback.format_exc()
         return f"Error in indexing: {str(e)}\n{traceback_str}", ds, []
-
-
+    
 def process_new_file(f, file_id, ds, all_images):
     """Process a file by generating new embeddings and saving them"""
     try:
-        # Convert file to images
-        images = convert_files([f])
-
-        if not images:
-            print(f"Could not convert {file_id} to images")
-            return
-
-        # Get embeddings for this file only
+        # Find the relevant images for this file
+        # Note: This assumes all_images has been populated with all pages from all files
+        # We need to find only the images for this specific file
+        
+        # If we don't already have images for this file, convert it
+        if not all_images:
+            print(f"Converting file {file_id} to images")
+            file_images = convert_files([f])
+        else:
+            # All images are already loaded, so we're good to proceed
+            file_images = all_images
+            
+        # Get embeddings for this file
         file_ds = []
-        status, file_ds, _ = index_gpu(images, file_ds)
-
+        status, file_ds, _ = index_gpu(file_images, file_ds)
+        
         # Save the new embeddings if successful
         if file_ds and len(file_ds) > 0:
-            saved = db.save_embeddings(file_id, file_ds, len(images))
+            saved = db.save_embeddings(file_id, file_ds, len(file_images))
             if saved:
                 print(f"Saved {len(file_ds)} new embeddings for {file_id}")
             else:
                 print(f"Failed to save embeddings for {file_id}")
-
-            # Add to our complete lists
+                
+            # Add to our complete embeddings list
             ds.extend(file_ds)
-            all_images.extend(images)
         else:
             print(f"Failed to generate embeddings for {file_id}")
     except Exception as e:
         print(f"Error processing new file {file_id}: {e}")
         import traceback
-
         traceback.print_exc()
-
-
     
 # Modified index_gpu function (keeping the core functionality the same)
 @spaces.GPU
