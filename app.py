@@ -404,7 +404,7 @@ PDF page {i+1}: (see attached image)
                 "http://localhost:11434/api/generate",
                 headers={"Content-Type": "application/json"},
                 data=json.dumps(payload),
-                timeout=60
+                timeout=120
             )
             
             # Clean up temporary files
